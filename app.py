@@ -1,16 +1,6 @@
 from __future__ import annotations
 
 import io
-import os
-
-# Conservative CPU settings for Streamlit Cloud to reduce native inference crashes.
-# These must be set before importing PaddlePaddle/PaddleOCR.
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-os.environ.setdefault("FLAGS_use_mkldnn", "0")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-
 import inspect
 import json
 import math
@@ -42,15 +32,10 @@ try:
 except Exception:
     easyocr = None
 
-PADDLE_IMPORT_ERROR = None
-PADDLE_VERSION = None
 try:
-    import paddle
-    PADDLE_VERSION = getattr(paddle, "__version__", "unknown")
     from paddleocr import PaddleOCR
-except Exception as exc:
+except Exception:
     PaddleOCR = None
-    PADDLE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 @dataclass
@@ -310,16 +295,11 @@ st.markdown("<div class='hero'><h1>▦ CAD 图形化文字智能转换</h1><p>�
 with st.sidebar:
     st.header("处理配置")
     threshold = st.slider("低置信度阈值", 0.0, 1.0, 0.55, 0.05)
-    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "PaddleOCR", "Tesseract"], index=0, help="PaddleOCR 使用固定版本的 CPU 推理依赖；首次运行可能下载模型。")
+    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "PaddleOCR", "Tesseract"], index=0, help="用于识别图形化文字渲染图；首次运行可能下载模型。Tesseract 需安装系统程序和语言包。")
     hide_source = st.checkbox("转换后隐藏原始图层", value=False)
     st.caption("本地运行时在本机处理；部署到云端时文件会发送到托管服务器。请勿上传涉密图纸。")
     status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None, "PaddleOCR": PaddleOCR is not None}
-    st.caption("模型状态：" + " · ".join(f"{k} {'✓' if v else '未安装/导入失败'}" for k,v in status.items()))
-    if PaddleOCR is None:
-        st.error("PaddleOCR 导入失败。‘未安装’可能是依赖冲突或动态库加载失败，不一定是包完全没有安装。")
-        st.code(PADDLE_IMPORT_ERROR or "没有捕获到具体原因")
-    else:
-        st.caption(f"PaddlePaddle 版本：{PADDLE_VERSION}")
+    st.caption("模型状态：" + " · ".join(f"{k} {'✓' if v else '未安装'}" for k,v in status.items()))
 
 uploaded = st.file_uploader("上传工图纸", type=["dxf", "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"], help="重点支持 DXF 中由 LINE/ARC/LWPOLYLINE 等实体构成的图形化文字；也支持 PNG/JPG 等截图 OCR")
 if not uploaded:
@@ -367,17 +347,10 @@ csv_bytes = df.to_csv(index=False).encode("utf-8-sig") if not df.empty else "编
 b1,b2,b3 = st.columns(3)
 b1.download_button("下载 JSON 识别报告", json_bytes, f"{uploaded.name}.json", "application/json")
 b2.download_button("下载 CSV 清单", csv_bytes, f"{uploaded.name}.csv", "text/csv")
-if suffix == ".dxf" and doc is not None:
+if doc is not None:
     add_dxf_text(doc, regions, hide_source)
-    out = io.StringIO()
-    doc.write(out)
-    b3.download_button(
-        "下载转换后的 DXF",
-        out.getvalue().encode("utf-8"),
-        f"{Path(uploaded.name).stem}_converted.dxf",
-        "application/dxf",
-    )
-    st.caption("已生成 DXF 导出文件；请在 CAD 中检查 Text_Converted_Layer 和 TEXT/MTEXT 实体。")
+    out = io.StringIO(); doc.write(out)
+    b3.download_button("下载转换后的 DXF", out.getvalue().encode("utf-8"), f"{Path(uploaded.name).stem}_converted.dxf", "application/dxf")
 else:
     b3.download_button("下载 TXT 清单", "\n".join(f"{r.id}\t{r.text}\t{r.confidence:.3f}" for r in regions), f"{uploaded.name}.txt", "text/plain")
 
