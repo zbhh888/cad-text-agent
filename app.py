@@ -1,6 +1,16 @@
 from __future__ import annotations
 
 import io
+import os
+
+# Conservative CPU settings for Streamlit Cloud to reduce native inference crashes.
+# These must be set before importing PaddlePaddle/PaddleOCR.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import inspect
 import json
 import math
@@ -147,9 +157,6 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
             # Keep the reason visible instead of silently turning every failure into an empty result.
             return f"[EasyOCR错误：{type(exc).__name__}: {exc}]", 0.0
     if engine == "PaddleOCR":
-        return "[PaddleOCR暂时停用：云端推理触发 C++ Segmentation fault；请先使用 EasyOCR]", 0.0
-
-        # Disabled until PaddlePaddle runtime compatibility is fixed.
         reader = get_paddle_reader()
         if reader is None: return "[PaddleOCR未安装]", 0.0
         try:
@@ -298,7 +305,7 @@ st.markdown("<div class='hero'><h1>▦ CAD 图形化文字智能转换</h1><p>�
 with st.sidebar:
     st.header("处理配置")
     threshold = st.slider("低置信度阈值", 0.0, 1.0, 0.55, 0.05)
-    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "Tesseract"], index=0, help="PaddleOCR 暂时停用：云端推理发生 Paddle C++ Segmentation fault，修复兼容性后再启用。")
+    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "PaddleOCR", "Tesseract"], index=0, help="PaddleOCR 使用固定版本的 CPU 推理依赖；首次运行可能下载模型。")
     hide_source = st.checkbox("转换后隐藏原始图层", value=False)
     st.caption("本地运行时在本机处理；部署到云端时文件会发送到托管服务器。请勿上传涉密图纸。")
     status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None, "PaddleOCR": PaddleOCR is not None}
