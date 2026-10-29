@@ -152,6 +152,7 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
             return "[PaddleOCR未安装：请检查 requirements.txt 和部署日志]", 0.0
 
         def parse_paddle(result):
+            """Normalize PaddleOCR 2.x/3.x outputs to [(text, score_or_none)]."""
             pairs = []
             for page in result or []:
                 payload = page if isinstance(page, dict) else getattr(page, "json", {})
@@ -159,15 +160,48 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
                     payload = payload()
                 if isinstance(payload, dict):
                     payload = payload.get("res", payload)
+
                 if isinstance(payload, dict) and "rec_texts" in payload:
                     texts = payload.get("rec_texts", []) or []
                     scores = payload.get("rec_scores", []) or []
-                    pairs.extend((str(t), float(scores[i]) if i < len(scores) else 0.0)
-                                 for i, t in enumerate(texts) if str(t).strip())
+                    if hasattr(texts, "tolist"):
+                        texts = texts.tolist()
+                    if hasattr(scores, "tolist"):
+                        scores = scores.tolist()
+                    if not isinstance(texts, (list, tuple)):
+                        texts = [texts]
+                    if not isinstance(scores, (list, tuple)):
+                        scores = [scores]
+
+                    for i, text in enumerate(texts):
+                        text = str(text).strip()
+                        if not text:
+                            continue
+                        score = None
+                        if i < len(scores):
+                            try:
+                                candidate = float(scores[i])
+                                if np.isfinite(candidate) and 0.0 <= candidate <= 1.0:
+                                    score = candidate
+                            except (TypeError, ValueError):
+                                pass
+                        pairs.append((text, score))
+
                 elif isinstance(page, (list, tuple)):
+                    # PaddleOCR 2.x: [box, (text, score)]
                     for line in page:
-                        if len(line) >= 2 and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
-                            pairs.append((str(line[1][0]), float(line[1][1])))
+                        if (isinstance(line, (list, tuple)) and len(line) >= 2
+                                and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2):
+                            text = str(line[1][0]).strip()
+                            if not text:
+                                continue
+                            try:
+                                score = float(line[1][1])
+                                if not np.isfinite(score) or not 0.0 <= score <= 1.0:
+                                    score = None
+                            except (TypeError, ValueError):
+                                score = None
+                            pairs.append((text, score))
             return pairs
 
         try:
@@ -178,26 +212,69 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
             gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
             if float(np.mean(gray)) < 127:
                 gray = cv2.bitwise_not(gray)
-            gray = cv2.copyMakeBorder(gray, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255)
+            gray = cv2.copyMakeBorder(
+                gray, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255
+            )
             target_h = max(128, min(320, gray.shape[0] * 4))
             scale = target_h / max(1, gray.shape[0])
-            gray = cv2.resize(gray, (max(1, int(gray.shape[1] * scale)), target_h),
-                              interpolation=cv2.INTER_CUBIC)
-            variants = [gray, cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]]
+            gray = cv2.resize(
+                gray, (max(1, int(gray.shape[1] * scale)), target_h),
+                interpolation=cv2.INTER_CUBIC
+            )
+            variants = [
+                gray,
+                cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            ]
             best, errors = [], []
+
             for variant in variants:
                 try:
                     if hasattr(reader, "predict"):
                         raw_result = reader.predict(variant)
                     else:
-                        raw_result = reader.ocr(cv2.cvtColor(variant, cv2.COLOR_GRAY2BGR), cls=True)
+                        raw_result = reader.ocr(
+                            cv2.cvtColor(variant, cv2.COLOR_GRAY2BGR), cls=True
+                        )
                     pairs = parse_paddle(raw_result)
-                    if pairs and sum(max(0.0, p[1]) for p in pairs) > sum(max(0.0, p[1]) for p in best):
+                    if not pairs:
+                        continue
+
+                    valid_scores = [
+                        score for _, score in pairs
+                        if score is not None and np.isfinite(score)
+                        and 0.0 <= score <= 1.0
+                    ]
+                    best_scores = [
+                        score for _, score in best
+                        if score is not None and np.isfinite(score)
+                        and 0.0 <= score <= 1.0
+                    ]
+
+                    # Prefer results with usable confidence scores, otherwise retain text.
+                    if (
+                        not best
+                        or (valid_scores and not best_scores)
+                        or (
+                            valid_scores and best_scores
+                            and float(np.mean(valid_scores)) > float(np.mean(best_scores))
+                        )
+                    ):
                         best = pairs
                 except Exception as exc:
                     errors.append(f"{type(exc).__name__}: {exc}")
+
             if best:
-                return " ".join(t for t, _ in best), float(np.mean([s for _, s in best]))
+                recognized_text = " ".join(text for text, _ in best)
+                valid_scores = [
+                    score for _, score in best
+                    if score is not None and np.isfinite(score)
+                    and 0.0 <= score <= 1.0
+                ]
+                # Keep the app's existing numeric API safe. A displayed 0.0 means
+                # "no valid score returned" unless the UI separately reports that state.
+                confidence = float(np.mean(valid_scores)) if valid_scores else 0.0
+                return recognized_text, confidence
+
             if errors:
                 return f"[PaddleOCR错误：{errors[0]}]", 0.0
             return "", 0.0
