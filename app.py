@@ -118,11 +118,34 @@ def get_paddle_reader():
 def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
     if engine == "EasyOCR":
         reader = get_easy_reader()
-        if reader is None: return "[EasyOCR未安装]", 0.0
+        if reader is None:
+            return "[EasyOCR未安装：请检查 requirements.txt 和部署日志]", 0.0
         try:
-            result = reader.readtext(crop, detail=1, paragraph=True)
-            return " ".join(str(x[1]) for x in result), float(np.mean([float(x[2]) for x in result])) if result else 0.0
-        except Exception: return "", 0.0
+            # Vector glyphs are rendered as white strokes on a black canvas.
+            # EasyOCR works more reliably with dark strokes on a light background.
+            work = crop.copy()
+            if work.ndim == 2:
+                work = cv2.cvtColor(work, cv2.COLOR_GRAY2BGR)
+            gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+            # Normalize polarity: use white background with black strokes.
+            if float(np.mean(gray)) < 127:
+                gray = cv2.bitwise_not(gray)
+            # Add generous white padding and enlarge small CAD glyphs.
+            gray = cv2.copyMakeBorder(gray, 18, 18, 24, 24, cv2.BORDER_CONSTANT, value=255)
+            target_h = max(96, min(256, gray.shape[0] * 4))
+            scale = target_h / max(1, gray.shape[0])
+            gray = cv2.resize(gray, (max(1, int(gray.shape[1] * scale)), target_h),
+                              interpolation=cv2.INTER_CUBIC)
+            # EasyOCR accepts a grayscale numpy image. paragraph=False preserves per-box results.
+            result = reader.readtext(gray, detail=1, paragraph=False,
+                                     text_threshold=0.25, low_text=0.15,
+                                     link_threshold=0.2, mag_ratio=2.0)
+            texts = [str(x[1]).strip() for x in result if len(x) >= 3 and str(x[1]).strip()]
+            scores = [float(x[2]) for x in result if len(x) >= 3 and str(x[1]).strip()]
+            return " ".join(texts), float(np.mean(scores)) if scores else 0.0
+        except Exception as exc:
+            # Keep the reason visible instead of silently turning every failure into an empty result.
+            return f"[EasyOCR错误：{type(exc).__name__}: {exc}]", 0.0
     if engine == "PaddleOCR":
         reader = get_paddle_reader()
         if reader is None: return "[PaddleOCR未安装]", 0.0
@@ -226,11 +249,11 @@ def vector_dxf_regions(msp, threshold: float = .55, engine: str = "Tesseract") -
         if not placed: groups.append({"items":[item], "box":item["box"]})
     out=[]
     for g in groups:
-        x1,y1,x2,y2=g["box"]; w=max(32,int((x2-x1)*3)); h=max(32,int((y2-y1)*3)); canvas=np.zeros((h+12,w+12,3),np.uint8)
+        x1,y1,x2,y2=g["box"]; w=max(32,int((x2-x1)*4)); h=max(32,int((y2-y1)*4)); canvas=np.full((h+24,w+24,3),255,np.uint8)
         for item in g["items"]:
             p=item["pts"]
-            q=[(int((x-x1)*3+6), int((y2-y)*3+6)) for x,y in p]
-            cv2.polylines(canvas,[np.array(q,np.int32)],False,(255,255,255),max(1,int(min(w,h)/80)))
+            q=[(int((x-x1)*4+12), int((y2-y)*4+12)) for x,y in p]
+            cv2.polylines(canvas,[np.array(q,np.int32)],False,(0,0,0),max(2,int(min(w,h)/45)))
         text, conf = ocr_crop(canvas, engine)
         if not text.strip() or text.startswith("["): continue
         handles=[str(i["entity"].dxf.handle) for i in g["items"]]
@@ -272,7 +295,7 @@ st.markdown("<div class='hero'><h1>▦ CAD 图形化文字智能转换</h1><p>�
 with st.sidebar:
     st.header("处理配置")
     threshold = st.slider("低置信度阈值", 0.0, 1.0, 0.55, 0.05)
-    ocr_engine = st.selectbox("OCR 模型", ["Tesseract", "EasyOCR", "PaddleOCR"], index=0, help="当前云端轻量版默认使用 Tesseract；EasyOCR/PaddleOCR 需额外安装依赖。")
+    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "PaddleOCR", "Tesseract"], index=0, help="用于识别图形化文字渲染图；首次运行可能下载模型。Tesseract 需安装系统程序和语言包。")
     hide_source = st.checkbox("转换后隐藏原始图层", value=False)
     st.caption("本地运行时在本机处理；部署到云端时文件会发送到托管服务器。请勿上传涉密图纸。")
     status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None, "PaddleOCR": PaddleOCR is not None}
@@ -302,6 +325,9 @@ c1,c2,c3,c4 = st.columns(4)
 for col, title, val in [(c1,"识别区域",len(regions)),(c2,"需人工复核",sum(r.needs_review for r in regions)),(c3,"平均置信度",f"{np.mean([r.confidence for r in regions])*100:.1f}%" if regions else "0%"),(c4,"处理耗时",f"{elapsed:.2f}s")]:
     col.markdown(f"<div class='metric'><span>{title}</span><br><b>{val}</b></div>", unsafe_allow_html=True)
 st.caption(note)
+if ocr_engine == "EasyOCR" and not regions:
+    st.warning("EasyOCR 没有返回可用文字。请检查下方诊断：标准 TEXT/MTEXT 会直接提取；图形化字形会先聚类、渲染，再由 EasyOCR 识别。单个线段字形（例如 A 或 工）本身也可能不符合 OCR 模型的训练特征。")
+    st.caption(f"EasyOCR 导入状态：{'已导入' if easyocr is not None else '未导入'}；若未导入，请检查云端构建日志。")
 
 left, right = st.columns([1.15, 1])
 with left:
