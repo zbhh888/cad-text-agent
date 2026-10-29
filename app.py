@@ -236,8 +236,18 @@ def add_dxf_text(doc, regions: list[TextRegion], hide_source: bool = False) -> N
         msp.add_text(r.text, dxfattribs={"layer": "Text_Converted_Layer", "height": height,
                                          "rotation": r.rotation, "insert": (p["min_x"], p["min_y"])})
         if r.needs_review:
-            msp.add_lwpolyline([(p["min_x"],p["min_y"]),(p["max_x"],p["min_y"]),(p["max_x"],p["max_y"]),(p["min_x"],p["max_y"]),(p["min_x"],p["min_y"])],
-                               dxfattribs={"layer": "Text_Converted_Layer", "color": 1, "closed": True})
+            # Use legacy POLYLINE for compatibility with R12 input DXF.
+            # LWPOLYLINE requires DXF R2000+, and raises DXFVersionError in R12 files.
+            msp.add_polyline2d(
+                [
+                    (p["min_x"], p["min_y"]),
+                    (p["max_x"], p["min_y"]),
+                    (p["max_x"], p["max_y"]),
+                    (p["min_x"], p["max_y"]),
+                ],
+                close=True,
+                dxfattribs={"layer": "Text_Converted_Layer", "color": 1},
+            )
     if hide_source:
         for layer in doc.layers:
             if layer.dxf.name != "Text_Converted_Layer":
