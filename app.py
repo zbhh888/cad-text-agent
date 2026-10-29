@@ -42,10 +42,15 @@ try:
 except Exception:
     easyocr = None
 
+PADDLE_IMPORT_ERROR = None
+PADDLE_VERSION = None
 try:
+    import paddle
+    PADDLE_VERSION = getattr(paddle, "__version__", "unknown")
     from paddleocr import PaddleOCR
-except Exception:
+except Exception as exc:
     PaddleOCR = None
+    PADDLE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 @dataclass
@@ -309,7 +314,12 @@ with st.sidebar:
     hide_source = st.checkbox("转换后隐藏原始图层", value=False)
     st.caption("本地运行时在本机处理；部署到云端时文件会发送到托管服务器。请勿上传涉密图纸。")
     status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None, "PaddleOCR": PaddleOCR is not None}
-    st.caption("模型状态：" + " · ".join(f"{k} {'✓' if v else '未安装'}" for k,v in status.items()))
+    st.caption("模型状态：" + " · ".join(f"{k} {'✓' if v else '未安装/导入失败'}" for k,v in status.items()))
+    if PaddleOCR is None:
+        st.error("PaddleOCR 导入失败。‘未安装’可能是依赖冲突或动态库加载失败，不一定是包完全没有安装。")
+        st.code(PADDLE_IMPORT_ERROR or "没有捕获到具体原因")
+    else:
+        st.caption(f"PaddlePaddle 版本：{PADDLE_VERSION}")
 
 uploaded = st.file_uploader("上传工图纸", type=["dxf", "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"], help="重点支持 DXF 中由 LINE/ARC/LWPOLYLINE 等实体构成的图形化文字；也支持 PNG/JPG 等截图 OCR")
 if not uploaded:
