@@ -1,14 +1,14 @@
-# CAD 图形化文字识别 - PaddleOCR 与 DXF 转换修复版
+# CAD OCR 恢复版
 
-此版本针对：
-1. PaddleOCR 漏掉线段构成的独立字母 A：增加反色/灰度归一化、留白、放大和阈值化的多版本识别尝试，并显示内部异常。能改善识别机会，但不保证所有图形字形均识别正确。
-2. 页面没有 DXF 下载按钮：当 `.dxf` 文件解析成功时，始终显示“下载转换后的 DXF”按钮。
+此版本恢复到此前 EasyOCR 已识别出 A 和“工”、PaddleOCR 可识别“工”的单次 PaddleOCR 推理流程，撤销最近加入的多种图像变体连续推理逻辑，以排查 Paddle C++ Segmentation fault。保留 EasyOCR 的反色、留白和放大预处理，并确保 DXF 输入时显示“下载转换后的 DXF”按钮。
 
-## 更新方法
-只需将此包中的 `app.py` 上传到 GitHub 仓库根目录覆盖原文件并 Commit changes。保留当前已经成功部署的 `requirements.txt`，本次不要更改依赖。等待 Streamlit 自动重启后重新上传 `sample_vector_glyphs.dxf`。
+## 更新
+只上传此包中的 app.py 到 GitHub 仓库根目录，覆盖现有 app.py 并提交。不要修改 requirements.txt 和 Python 3.11 设置。等待 Streamlit 自动重启。
 
-## 验收
-- 选择 PaddleOCR，检查是否识别 A 和“工”。
-- DXF 解析成功后应出现“下载转换后的 DXF”。
-- 下载后用 CAD 打开，检查 `Text_Converted_Layer` 和标准 `TEXT/MTEXT` 实体。
-- 按钮出现不等于转换验收通过，必须实际检查 DXF 文件。
+## 测试顺序
+1. 先选择 EasyOCR 测试 A 和“工”。
+2. 再选择 PaddleOCR 测试，确认应用是否仍然崩溃。
+3. 检查 DXF 上传后是否显示下载转换后的 DXF。
+4. 下载后在 CAD 中检查 Text_Converted_Layer 和标准 TEXT/MTEXT 实体。
+
+如果 PaddleOCR 仍出现 C++ Segmentation fault，说明可能是 PaddlePaddle/PaddleOCR 的二进制运行时兼容或底层推理问题，需要进一步固定兼容版本；不要在同一进程里继续尝试多次推理，因为原生段错误无法由 Python try/except 捕获。

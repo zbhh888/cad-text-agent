@@ -148,10 +148,9 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
             return f"[EasyOCR错误：{type(exc).__name__}: {exc}]", 0.0
     if engine == "PaddleOCR":
         reader = get_paddle_reader()
-        if reader is None:
-            return "[PaddleOCR未安装：请检查 requirements.txt 和部署日志]", 0.0
-
-        def parse_paddle(result):
+        if reader is None: return "[PaddleOCR未安装]", 0.0
+        try:
+            result = reader.predict(crop) if hasattr(reader, "predict") else reader.ocr(crop, cls=True)
             pairs = []
             for page in result or []:
                 payload = page if isinstance(page, dict) else getattr(page, "json", {})
@@ -160,49 +159,13 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
                 if isinstance(payload, dict):
                     payload = payload.get("res", payload)
                 if isinstance(payload, dict) and "rec_texts" in payload:
-                    texts = payload.get("rec_texts", []) or []
-                    scores = payload.get("rec_scores", []) or []
-                    pairs.extend((str(t), float(scores[i]) if i < len(scores) else 0.0)
-                                 for i, t in enumerate(texts) if str(t).strip())
+                    texts = payload.get("rec_texts", [])
+                    scores = payload.get("rec_scores", [])
+                    pairs.extend((text, score) for text, score in zip(texts, scores))
                 elif isinstance(page, (list, tuple)):
-                    for line in page:
-                        if len(line) >= 2 and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2:
-                            pairs.append((str(line[1][0]), float(line[1][1])))
-            return pairs
-
-        try:
-            # OCR-friendly preprocessing for isolated CAD vector glyphs, e.g. outlined A.
-            base = crop.copy()
-            if base.ndim == 2:
-                base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
-            gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
-            if float(np.mean(gray)) < 127:
-                gray = cv2.bitwise_not(gray)
-            gray = cv2.copyMakeBorder(gray, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255)
-            target_h = max(128, min(320, gray.shape[0] * 4))
-            scale = target_h / max(1, gray.shape[0])
-            gray = cv2.resize(gray, (max(1, int(gray.shape[1] * scale)), target_h),
-                              interpolation=cv2.INTER_CUBIC)
-            variants = [gray, cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]]
-            best, errors = [], []
-            for variant in variants:
-                try:
-                    if hasattr(reader, "predict"):
-                        raw_result = reader.predict(variant)
-                    else:
-                        raw_result = reader.ocr(cv2.cvtColor(variant, cv2.COLOR_GRAY2BGR), cls=True)
-                    pairs = parse_paddle(raw_result)
-                    if pairs and sum(max(0.0, p[1]) for p in pairs) > sum(max(0.0, p[1]) for p in best):
-                        best = pairs
-                except Exception as exc:
-                    errors.append(f"{type(exc).__name__}: {exc}")
-            if best:
-                return " ".join(t for t, _ in best), float(np.mean([s for _, s in best]))
-            if errors:
-                return f"[PaddleOCR错误：{errors[0]}]", 0.0
-            return "", 0.0
-        except Exception as exc:
-            return f"[PaddleOCR错误：{type(exc).__name__}: {exc}]", 0.0
+                    pairs.extend(line[1] for line in (page or []) if len(line) >= 2)
+            return " ".join(str(x[0]) for x in pairs), float(np.mean([float(x[1]) for x in pairs])) if pairs else 0.0
+        except Exception: return "", 0.0
     if pytesseract is None:
         return "[Tesseract未安装]", 0.0
     try:
@@ -366,10 +329,6 @@ if ocr_engine == "EasyOCR" and not regions:
     st.warning("EasyOCR 没有返回可用文字。请检查下方诊断：标准 TEXT/MTEXT 会直接提取；图形化字形会先聚类、渲染，再由 EasyOCR 识别。单个线段字形（例如 A 或 工）本身也可能不符合 OCR 模型的训练特征。")
     st.caption(f"EasyOCR 导入状态：{'已导入' if easyocr is not None else '未导入'}；若未导入，请检查云端构建日志。")
 
-if ocr_engine == "PaddleOCR" and not regions:
-    st.warning("PaddleOCR 没有返回可用文字。检查图形字形是否被聚类为候选区域；如发生内部异常，页面会显示错误信息。")
-    st.caption(f"PaddleOCR 导入状态：{'已导入' if PaddleOCR is not None else '未导入'}。")
-
 left, right = st.columns([1.15, 1])
 with left:
     st.subheader("识别结果预览")
@@ -389,16 +348,18 @@ b1,b2,b3 = st.columns(3)
 b1.download_button("下载 JSON 识别报告", json_bytes, f"{uploaded.name}.json", "application/json")
 b2.download_button("下载 CSV 清单", csv_bytes, f"{uploaded.name}.csv", "text/csv")
 if suffix == ".dxf" and doc is not None:
-    # Always show the DXF download after a successful DXF parse.
     add_dxf_text(doc, regions, hide_source)
     out = io.StringIO()
     doc.write(out)
-    converted_data = out.getvalue().encode("utf-8")
-    b3.download_button("下载转换后的 DXF", converted_data,
-                       f"{Path(uploaded.name).stem}_converted.dxf", "application/dxf")
-    st.caption("DXF 转换文件已生成。请在 CAD 中检查 Text_Converted_Layer、文字位置和原始图形。")
+    b3.download_button(
+        "下载转换后的 DXF",
+        out.getvalue().encode("utf-8"),
+        f"{Path(uploaded.name).stem}_converted.dxf",
+        "application/dxf",
+    )
+    st.caption("已生成 DXF 导出文件；请在 CAD 中检查 Text_Converted_Layer 和 TEXT/MTEXT 实体。")
 else:
-    b3.download_button("下载 TXT 清单", "\\n".join(f"{r.id}\\t{r.text}\\t{r.confidence:.3f}" for r in regions), f"{uploaded.name}.txt", "text/plain")
+    b3.download_button("下载 TXT 清单", "\n".join(f"{r.id}\t{r.text}\t{r.confidence:.3f}" for r in regions), f"{uploaded.name}.txt", "text/plain")
 
 with st.expander("处理说明与企业验收提示"):
     st.markdown("""- 低置信度区域用红色框标记，建议人工复核。\n- DXF 模式会创建 `Text_Converted_Layer` 并写入 TEXT 对象。\n- DWG 需要企业部署已授权的 CAD/ODA 转换服务，再接入同一适配器接口。\n- 准确率、误报率和 5 秒性能指标必须使用甲方标注测试集实测，不以演示数据代替。""")
