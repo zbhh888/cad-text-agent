@@ -286,6 +286,53 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
                         raw_result = reader.ocr(
                             cv2.cvtColor(variant, cv2.COLOR_GRAY2BGR), cls=True
                         )
+
+                    # Materialize PaddleOCR 3.x generators so the result can be
+                    # both inspected and parsed reliably.
+                    if raw_result is None:
+                        raw_result = []
+                    elif not isinstance(raw_result, (list, tuple, dict)):
+                        try:
+                            raw_result = list(raw_result)
+                        except TypeError:
+                            raw_result = [raw_result]
+
+                    # Temporary diagnostic: show actual return structure when the
+                    # user is troubleshooting a zero confidence score.
+                    if not st.session_state.get("_paddle_raw_debug_shown", False):
+                        debug_items = []
+                        pages_for_debug = raw_result if isinstance(raw_result, (list, tuple)) else [raw_result]
+                        for page_debug in pages_for_debug[:2]:
+                            if isinstance(page_debug, dict):
+                                debug_payload = page_debug
+                            else:
+                                debug_payload = getattr(page_debug, "json", None)
+                                if callable(debug_payload):
+                                    try:
+                                        debug_payload = debug_payload()
+                                    except Exception as debug_exc:
+                                        debug_payload = f"json() failed: {debug_exc}"
+                            if isinstance(debug_payload, str):
+                                debug_payload = debug_payload[:1200]
+                            elif isinstance(debug_payload, dict):
+                                debug_payload = {
+                                    key: (
+                                        value.tolist() if hasattr(value, "tolist")
+                                        else repr(value)[:500]
+                                    )
+                                    for key, value in debug_payload.items()
+                                    if key in ("res", "rec_texts", "rec_scores", "text", "score", "texts", "scores")
+                                }
+                            else:
+                                debug_payload = repr(debug_payload)[:1200]
+                            debug_items.append({
+                                "result_type": type(page_debug).__name__,
+                                "payload": debug_payload
+                            })
+                        st.session_state["_paddle_raw_debug_shown"] = True
+                        st.info("PaddleOCR 原始返回值诊断（用于定位置信度为 0 的原因）")
+                        st.code(json.dumps(debug_items, ensure_ascii=False, default=str, indent=2)[:5000], language="json")
+
                     pairs = parse_paddle(raw_result)
                     if not pairs:
                         continue
