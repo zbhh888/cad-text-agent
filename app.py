@@ -272,7 +272,7 @@ st.markdown("<div class='hero'><h1>▦ CAD 图形化文字智能转换</h1><p>�
 with st.sidebar:
     st.header("处理配置")
     threshold = st.slider("低置信度阈值", 0.0, 1.0, 0.55, 0.05)
-    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "PaddleOCR", "Tesseract"], index=0, help="用于识别图形化文字渲染图；首次运行可能下载模型。Tesseract 需安装系统程序和语言包。")
+    ocr_engine = st.selectbox("OCR 模型", ["Tesseract", "EasyOCR", "PaddleOCR"], index=0, help="当前云端轻量版默认使用 Tesseract；EasyOCR/PaddleOCR 需额外安装依赖。")
     hide_source = st.checkbox("转换后隐藏原始图层", value=False)
     st.caption("本地运行时在本机处理；部署到云端时文件会发送到托管服务器。请勿上传涉密图纸。")
     status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None, "PaddleOCR": PaddleOCR is not None}
