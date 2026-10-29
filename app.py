@@ -152,56 +152,107 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
             return "[PaddleOCR未安装：请检查 requirements.txt 和部署日志]", 0.0
 
         def parse_paddle(result):
-            """Normalize PaddleOCR 2.x/3.x outputs to [(text, score_or_none)]."""
+            """Normalize PaddleOCR 2.x/3.x result formats to [(text, score_or_none)]."""
+
+            def as_payload(value):
+                if callable(value):
+                    try:
+                        value = value()
+                    except Exception:
+                        return None
+                if isinstance(value, (str, bytes)):
+                    try:
+                        value = json.loads(value)
+                    except Exception:
+                        return None
+                return value
+
+            def normalize_score(value):
+                try:
+                    score = float(value)
+                except (TypeError, ValueError):
+                    return None
+                if not np.isfinite(score) or score < 0:
+                    return None
+                # Some wrappers expose confidence as 0..100 rather than 0..1.
+                if 1.0 < score <= 100.0:
+                    score /= 100.0
+                if 0.0 <= score <= 1.0:
+                    return score
+                return None
+
             pairs = []
-            for page in result or []:
-                payload = page if isinstance(page, dict) else getattr(page, "json", {})
-                if callable(payload):
-                    payload = payload()
+            pages = result if isinstance(result, (list, tuple)) else [result]
+            for page in pages:
+                payload = page if isinstance(page, dict) else getattr(page, "json", None)
+                payload = as_payload(payload)
+
+                if payload is None and not isinstance(page, (list, tuple, dict)):
+                    # Some PaddleOCR result wrappers expose result data as attributes.
+                    payload = {}
+                    for key in ("res", "rec_texts", "rec_scores", "text", "score"):
+                        try:
+                            value = getattr(page, key)
+                        except Exception:
+                            continue
+                        if value is not None:
+                            payload[key] = value
+
                 if isinstance(payload, dict):
                     payload = payload.get("res", payload)
+                    payload = as_payload(payload)
+                    if isinstance(payload, dict):
+                        texts = payload.get("rec_texts")
+                        scores = payload.get("rec_scores")
+                        # Support alternative field names used by some wrappers.
+                        if texts is None:
+                            texts = payload.get("texts", payload.get("text", []))
+                        if scores is None:
+                            scores = payload.get(
+                                "text_rec_score",
+                                payload.get("scores", payload.get("score", []))
+                            )
 
-                if isinstance(payload, dict) and "rec_texts" in payload:
-                    texts = payload.get("rec_texts", []) or []
-                    scores = payload.get("rec_scores", []) or []
-                    if hasattr(texts, "tolist"):
-                        texts = texts.tolist()
-                    if hasattr(scores, "tolist"):
-                        scores = scores.tolist()
-                    if not isinstance(texts, (list, tuple)):
-                        texts = [texts]
-                    if not isinstance(scores, (list, tuple)):
-                        scores = [scores]
+                        if hasattr(texts, "tolist"):
+                            texts = texts.tolist()
+                        if hasattr(scores, "tolist"):
+                            scores = scores.tolist()
+                        if texts is None:
+                            texts = []
+                        if not isinstance(texts, (list, tuple)):
+                            texts = [texts]
+                        if scores is None:
+                            scores = []
+                        if not isinstance(scores, (list, tuple)):
+                            scores = [scores]
 
-                    for i, text in enumerate(texts):
-                        text = str(text).strip()
-                        if not text:
-                            continue
-                        score = None
-                        if i < len(scores):
-                            try:
-                                candidate = float(scores[i])
-                                if np.isfinite(candidate) and 0.0 <= candidate <= 1.0:
-                                    score = candidate
-                            except (TypeError, ValueError):
-                                pass
-                        pairs.append((text, score))
+                        # A single nested score can arrive as [[0.98]].
+                        flattened_scores = []
+                        for item in scores:
+                            if hasattr(item, "tolist"):
+                                item = item.tolist()
+                            while isinstance(item, (list, tuple)) and len(item) == 1:
+                                item = item[0]
+                            flattened_scores.append(item)
 
-                elif isinstance(page, (list, tuple)):
-                    # PaddleOCR 2.x: [box, (text, score)]
-                    for line in page:
-                        if (isinstance(line, (list, tuple)) and len(line) >= 2
-                                and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2):
-                            text = str(line[1][0]).strip()
+                        for i, text in enumerate(texts):
+                            text = str(text).strip()
                             if not text:
                                 continue
-                            try:
-                                score = float(line[1][1])
-                                if not np.isfinite(score) or not 0.0 <= score <= 1.0:
-                                    score = None
-                            except (TypeError, ValueError):
-                                score = None
+                            score = normalize_score(flattened_scores[i]) if i < len(flattened_scores) else None
                             pairs.append((text, score))
+                        continue
+
+                # PaddleOCR 2.x output: [[box, (text, score)], ...]
+                if isinstance(page, (list, tuple)):
+                    for line in page:
+                        if (
+                            isinstance(line, (list, tuple)) and len(line) >= 2
+                            and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2
+                        ):
+                            text = str(line[1][0]).strip()
+                            if text:
+                                pairs.append((text, normalize_score(line[1][1])))
             return pairs
 
         try:
@@ -273,6 +324,10 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
                 # Keep the app's existing numeric API safe. A displayed 0.0 means
                 # "no valid score returned" unless the UI separately reports that state.
                 confidence = float(np.mean(valid_scores)) if valid_scores else 0.0
+                if not valid_scores:
+                    # Keep existing return type compatible; tell the user this is missing data,
+                    # not a measured confidence of zero.
+                    st.caption("PaddleOCR 已返回文字，但当前结果中未读取到有效置信度分数；显示的 0% 不应视为真实模型置信度。")
                 return recognized_text, confidence
 
             if errors:
