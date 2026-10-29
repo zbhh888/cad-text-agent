@@ -32,10 +32,6 @@ try:
 except Exception:
     easyocr = None
 
-try:
-    from paddleocr import PaddleOCR
-except Exception:
-    PaddleOCR = None
 
 
 @dataclass
@@ -101,19 +97,6 @@ def image_regions(image: np.ndarray, threshold: float = 0.55, engine: str = "Tes
 def get_easy_reader():
     return easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False) if easyocr else None
 
-@st.cache_resource(show_spinner=False)
-def get_paddle_reader():
-    if PaddleOCR is None:
-        return None
-    parameters = inspect.signature(PaddleOCR).parameters
-    options: dict[str, object] = {"lang": "ch"}
-    if "use_textline_orientation" in parameters:
-        options["use_textline_orientation"] = True
-    else:
-        options["use_angle_cls"] = True
-        if "show_log" in parameters:
-            options["show_log"] = False
-    return PaddleOCR(**options)
 
 def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
     if engine == "EasyOCR":
@@ -146,242 +129,6 @@ def ocr_crop(crop: np.ndarray, engine: str = "Tesseract") -> tuple[str, float]:
         except Exception as exc:
             # Keep the reason visible instead of silently turning every failure into an empty result.
             return f"[EasyOCR错误：{type(exc).__name__}: {exc}]", 0.0
-    if engine == "PaddleOCR":
-        reader = get_paddle_reader()
-        if reader is None:
-            return "[PaddleOCR未安装：请检查 requirements.txt 和部署日志]", 0.0
-
-        def parse_paddle(result):
-            """Normalize PaddleOCR 2.x/3.x result formats to [(text, score_or_none)]."""
-
-            def as_payload(value):
-                if callable(value):
-                    try:
-                        value = value()
-                    except Exception:
-                        return None
-                if isinstance(value, (str, bytes)):
-                    try:
-                        value = json.loads(value)
-                    except Exception:
-                        return None
-                return value
-
-            def normalize_score(value):
-                try:
-                    score = float(value)
-                except (TypeError, ValueError):
-                    return None
-                if not np.isfinite(score) or score < 0:
-                    return None
-                # Some wrappers expose confidence as 0..100 rather than 0..1.
-                if 1.0 < score <= 100.0:
-                    score /= 100.0
-                if 0.0 <= score <= 1.0:
-                    return score
-                return None
-
-            pairs = []
-            pages = result if isinstance(result, (list, tuple)) else [result]
-            for page in pages:
-                payload = page if isinstance(page, dict) else getattr(page, "json", None)
-                payload = as_payload(payload)
-
-                if payload is None and not isinstance(page, (list, tuple, dict)):
-                    # Some PaddleOCR result wrappers expose result data as attributes.
-                    payload = {}
-                    for key in ("res", "rec_texts", "rec_scores", "text", "score"):
-                        try:
-                            value = getattr(page, key)
-                        except Exception:
-                            continue
-                        if value is not None:
-                            payload[key] = value
-
-                if isinstance(payload, dict):
-                    payload = payload.get("res", payload)
-                    payload = as_payload(payload)
-                    if isinstance(payload, dict):
-                        texts = payload.get("rec_texts")
-                        scores = payload.get("rec_scores")
-                        # Support alternative field names used by some wrappers.
-                        if texts is None:
-                            texts = payload.get("texts", payload.get("text", []))
-                        if scores is None:
-                            scores = payload.get(
-                                "text_rec_score",
-                                payload.get("scores", payload.get("score", []))
-                            )
-
-                        if hasattr(texts, "tolist"):
-                            texts = texts.tolist()
-                        if hasattr(scores, "tolist"):
-                            scores = scores.tolist()
-                        if texts is None:
-                            texts = []
-                        if not isinstance(texts, (list, tuple)):
-                            texts = [texts]
-                        if scores is None:
-                            scores = []
-                        if not isinstance(scores, (list, tuple)):
-                            scores = [scores]
-
-                        # A single nested score can arrive as [[0.98]].
-                        flattened_scores = []
-                        for item in scores:
-                            if hasattr(item, "tolist"):
-                                item = item.tolist()
-                            while isinstance(item, (list, tuple)) and len(item) == 1:
-                                item = item[0]
-                            flattened_scores.append(item)
-
-                        for i, text in enumerate(texts):
-                            text = str(text).strip()
-                            if not text:
-                                continue
-                            score = normalize_score(flattened_scores[i]) if i < len(flattened_scores) else None
-                            pairs.append((text, score))
-                        continue
-
-                # PaddleOCR 2.x output: [[box, (text, score)], ...]
-                if isinstance(page, (list, tuple)):
-                    for line in page:
-                        if (
-                            isinstance(line, (list, tuple)) and len(line) >= 2
-                            and isinstance(line[1], (list, tuple)) and len(line[1]) >= 2
-                        ):
-                            text = str(line[1][0]).strip()
-                            if text:
-                                pairs.append((text, normalize_score(line[1][1])))
-            return pairs
-
-        try:
-            # OCR-friendly preprocessing for isolated CAD vector glyphs, e.g. outlined A.
-            base = crop.copy()
-            if base.ndim == 2:
-                base = cv2.cvtColor(base, cv2.COLOR_GRAY2BGR)
-            gray = cv2.cvtColor(base, cv2.COLOR_BGR2GRAY)
-            if float(np.mean(gray)) < 127:
-                gray = cv2.bitwise_not(gray)
-            gray = cv2.copyMakeBorder(
-                gray, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=255
-            )
-            target_h = max(128, min(320, gray.shape[0] * 4))
-            scale = target_h / max(1, gray.shape[0])
-            gray = cv2.resize(
-                gray, (max(1, int(gray.shape[1] * scale)), target_h),
-                interpolation=cv2.INTER_CUBIC
-            )
-            variants = [
-                gray,
-                cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-            ]
-            best, errors = [], []
-
-            for variant in variants:
-                try:
-                    if hasattr(reader, "predict"):
-                        raw_result = reader.predict(variant)
-                    else:
-                        raw_result = reader.ocr(
-                            cv2.cvtColor(variant, cv2.COLOR_GRAY2BGR), cls=True
-                        )
-
-                    # Materialize PaddleOCR 3.x generators so the result can be
-                    # both inspected and parsed reliably.
-                    if raw_result is None:
-                        raw_result = []
-                    elif not isinstance(raw_result, (list, tuple, dict)):
-                        try:
-                            raw_result = list(raw_result)
-                        except TypeError:
-                            raw_result = [raw_result]
-
-                    # Temporary diagnostic: show actual return structure when the
-                    # user is troubleshooting a zero confidence score.
-                    if not st.session_state.get("_paddle_raw_debug_shown", False):
-                        debug_items = []
-                        pages_for_debug = raw_result if isinstance(raw_result, (list, tuple)) else [raw_result]
-                        for page_debug in pages_for_debug[:2]:
-                            if isinstance(page_debug, dict):
-                                debug_payload = page_debug
-                            else:
-                                debug_payload = getattr(page_debug, "json", None)
-                                if callable(debug_payload):
-                                    try:
-                                        debug_payload = debug_payload()
-                                    except Exception as debug_exc:
-                                        debug_payload = f"json() failed: {debug_exc}"
-                            if isinstance(debug_payload, str):
-                                debug_payload = debug_payload[:1200]
-                            elif isinstance(debug_payload, dict):
-                                debug_payload = {
-                                    key: (
-                                        value.tolist() if hasattr(value, "tolist")
-                                        else repr(value)[:500]
-                                    )
-                                    for key, value in debug_payload.items()
-                                    if key in ("res", "rec_texts", "rec_scores", "text", "score", "texts", "scores")
-                                }
-                            else:
-                                debug_payload = repr(debug_payload)[:1200]
-                            debug_items.append({
-                                "result_type": type(page_debug).__name__,
-                                "payload": debug_payload
-                            })
-                        st.session_state["_paddle_raw_debug_shown"] = True
-                        st.info("PaddleOCR 原始返回值诊断（用于定位置信度为 0 的原因）")
-                        st.code(json.dumps(debug_items, ensure_ascii=False, default=str, indent=2)[:5000], language="json")
-
-                    pairs = parse_paddle(raw_result)
-                    if not pairs:
-                        continue
-
-                    valid_scores = [
-                        score for _, score in pairs
-                        if score is not None and np.isfinite(score)
-                        and 0.0 <= score <= 1.0
-                    ]
-                    best_scores = [
-                        score for _, score in best
-                        if score is not None and np.isfinite(score)
-                        and 0.0 <= score <= 1.0
-                    ]
-
-                    # Prefer results with usable confidence scores, otherwise retain text.
-                    if (
-                        not best
-                        or (valid_scores and not best_scores)
-                        or (
-                            valid_scores and best_scores
-                            and float(np.mean(valid_scores)) > float(np.mean(best_scores))
-                        )
-                    ):
-                        best = pairs
-                except Exception as exc:
-                    errors.append(f"{type(exc).__name__}: {exc}")
-
-            if best:
-                recognized_text = " ".join(text for text, _ in best)
-                valid_scores = [
-                    score for _, score in best
-                    if score is not None and np.isfinite(score)
-                    and 0.0 <= score <= 1.0
-                ]
-                # Keep the app's existing numeric API safe. A displayed 0.0 means
-                # "no valid score returned" unless the UI separately reports that state.
-                confidence = float(np.mean(valid_scores)) if valid_scores else 0.0
-                if not valid_scores:
-                    # Keep existing return type compatible; tell the user this is missing data,
-                    # not a measured confidence of zero.
-                    st.caption("PaddleOCR 已返回文字，但当前结果中未读取到有效置信度分数；显示的 0% 不应视为真实模型置信度。")
-                return recognized_text, confidence
-
-            if errors:
-                return f"[PaddleOCR错误：{errors[0]}]", 0.0
-            return "", 0.0
-        except Exception as exc:
-            return f"[PaddleOCR错误：{type(exc).__name__}: {exc}]", 0.0
     if pytesseract is None:
         return "[Tesseract未安装]", 0.0
     try:
@@ -511,10 +258,10 @@ st.markdown("<div class='hero'><h1>▦ CAD 图形化文字智能转换</h1><p>�
 with st.sidebar:
     st.header("处理配置")
     threshold = st.slider("低置信度阈值", 0.0, 1.0, 0.55, 0.05)
-    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "PaddleOCR", "Tesseract"], index=0, help="用于识别图形化文字渲染图；首次运行可能下载模型。Tesseract 需安装系统程序和语言包。")
+    ocr_engine = st.selectbox("OCR 模型", ["EasyOCR", "Tesseract"], index=0, help="用于识别图形化文字渲染图；首次运行可能下载模型。Tesseract 需安装系统程序和语言包。")
     hide_source = st.checkbox("转换后隐藏原始图层", value=False)
     st.caption("本地运行时在本机处理；部署到云端时文件会发送到托管服务器。请勿上传涉密图纸。")
-    status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None, "PaddleOCR": PaddleOCR is not None}
+    status = {"Tesseract": pytesseract is not None, "EasyOCR": easyocr is not None}
     st.caption("模型状态：" + " · ".join(f"{k} {'✓' if v else '未安装'}" for k,v in status.items()))
 
 uploaded = st.file_uploader("上传工图纸", type=["dxf", "png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"], help="重点支持 DXF 中由 LINE/ARC/LWPOLYLINE 等实体构成的图形化文字；也支持 PNG/JPG 等截图 OCR")
@@ -544,10 +291,6 @@ st.caption(note)
 if ocr_engine == "EasyOCR" and not regions:
     st.warning("EasyOCR 没有返回可用文字。请检查下方诊断：标准 TEXT/MTEXT 会直接提取；图形化字形会先聚类、渲染，再由 EasyOCR 识别。单个线段字形（例如 A 或 工）本身也可能不符合 OCR 模型的训练特征。")
     st.caption(f"EasyOCR 导入状态：{'已导入' if easyocr is not None else '未导入'}；若未导入，请检查云端构建日志。")
-
-if ocr_engine == "PaddleOCR" and not regions:
-    st.warning("PaddleOCR 没有返回可用文字。检查图形字形是否被聚类为候选区域；如发生内部异常，页面会显示错误信息。")
-    st.caption(f"PaddleOCR 导入状态：{'已导入' if PaddleOCR is not None else '未导入'}。")
 
 left, right = st.columns([1.15, 1])
 with left:
